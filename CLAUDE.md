@@ -54,9 +54,15 @@ keep it here as the reference and as the basis for the DEM-derived fallback path
 
 ## Architecture decisions (locked)
 
-- **Engine = wrap RiverREM** (not a hand-rolled chain). RiverREM is OpenTopography's own,
-  peer-reviewed package; it gives the proven IDW+KDTree interpolation and the logarithmic color
-  ramp for free.
+- **Engine = NATIVE scipy-KDTree IDW** (`rem_engine.native_rem`). *Updated 2026-06 after a
+  smoke test.* We originally planned to **wrap RiverREM**, but the only `riverrem` on PyPI is a
+  broken 0.0.1 relic (bare `import gdal`, no `centerline_shp`, crashes < 1M px, viz breaks on
+  QGIS's seaborn 0.10), and the working RiverREM lives only on GitHub and drags in osmnx + a
+  newer seaborn that would destabilize QGIS's bundled stack. The smoke test confirmed the core
+  REM math runs correctly against the bundled GDAL 3.3.2, so the plugin computes the REM itself
+  with numpy + `scipy.spatial.cKDTree` IDW + GDAL — **zero external installs**. `make_rem` still
+  *tries* a RiverREM wrap path first so a future working install is picked up automatically, then
+  falls through to native. **Do not `pip install riverrem`** — it's the broken relic.
 - **Target = QGIS 3.40 LTR.** Modern `native:` Processing IDs and PyQGIS APIs apply.
 - **Centerline = OSM-primary + DEM-derived fallback.** RiverREM fetches the OSM centerline via
   osmnx automatically; when OSM returns nothing, derive a centerline from the DEM (GRASS

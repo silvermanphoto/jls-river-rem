@@ -1,0 +1,287 @@
+"""rem_task.py — the background QgsTask that runs the whole REM pipeline.
+
+Orchestration (all in run(), off the main thread):
+
+    1. Pick the highest-available DEM candidate list (dem_selector) and try
+       each in order until one downloads -> raw dem.tif (EPSG:4326 GTiff).
+    2. Reproject that DEM to the local UTM zone with gdal:warpreproject
+       (bilinear) -> dem_utm.tif.
+    3. Get a river centerline (centerline): manual layer / Overpass / GRASS.
+    4. Generate the REM (rem_engine): riverrem wrap, native scipy fallback.
+
+run() NEVER touches QgsProject, layers, or any GUI object. It only computes,
+reports progress, checks isCanceled(), and stashes results/exception. All
+layer-adding + styling + message-bar reporting happens in finished(), which
+the task manager calls back on the main thread.
+"""
+
+import os
+import traceback
+
+import processing
+
+from qgis.PyQt.QtCore import QCoreApplication
+
+from qgis.core import (
+    Qgis,
+    QgsTask,
+    QgsProject,
+    QgsVectorLayer,
+    QgsCoordinateReferenceSystem,
+)
+
+from . import dem_selector
+from . import centerline as centerline_mod
+from . import rem_engine
+from . import styling
+
+
+MESSAGE_CATEGORY = "RiverREM"
+
+
+class RemTask(QgsTask):
+    """Runs DEM download -> UTM warp -> centerline -> REM in the background."""
+
+    def __init__(self, bbox4326, api_key, out_root, use_selected_layer, manual_layer):
+        """
+        bbox4326: (south, north, west, east) in EPSG:4326.
+        api_key: OpenTopography API key (passed as a query param downstream).
+        out_root: project-level rem_outputs/<slug>_<timestamp>/ folder for this run.
+        use_selected_layer: bool — if True, prefer the user's selected line layer.
+        manual_layer: the QgsVectorLayer to use as the manual centerline, or None.
+            (Captured on the MAIN thread before the task starts — we only read
+            its source path inside run(), never touch the live object.)
+        """
+        super().__init__("Generate River REM", QgsTask.CanCancel)
+
+        self.bbox4326 = bbox4326
+        self.api_key = api_key
+        self.out_root = out_root
+        self.use_selected_layer = use_selected_layer
+
+        # Resolve the manual layer to a plain shapefile path NOW (main thread,
+        # in __init__) so run() never has to read a live QgsMapLayer. If the
+        # selected layer isn't a usable file-based line source, we drop it.
+        self.manual_centerline_path = None
+        if use_selected_layer and manual_layer is not None:
+            try:
+                src = manual_layer.source()
+                # source() can carry "|layername=..." etc.; strip to the file.
+                path = src.split("|")[0]
+                if path and os.path.exists(path):
+                    self.manual_centerline_path = path
+            except Exception:
+                self.manual_centerline_path = None
+
+        self.results = None   # dict on success (see below)
+        self.exc = None       # str traceback on failure
+
+    # -- helpers --------------------------------------------------------------
+
+    def _progress_cb(self, frac):
+        """Adapter so engine/download helpers can drive the task progress bar.
+
+        frac is 0..1 for the *current stage*; we leave the absolute scaling to
+        the explicit setProgress() calls in run() and just nudge within range.
+        """
+        try:
+            self.setProgress(max(0.0, min(100.0, float(frac) * 100.0)))
+        except Exception:
+            pass
+
+    # -- main work (background thread) ---------------------------------------
+
+    def run(self):
+        """Heavy lifting. Returns True on success, False on failure/cancel.
+
+        Stores self.results on success and self.exc on failure. Absolutely no
+        QgsProject / layer / GUI access here.
+        """
+        try:
+            south, north, west, east = self.bbox4326
+            os.makedirs(self.out_root, exist_ok=True)
+
+            # ---- Stage 1: download the highest-available DEM ----------------
+            self.setProgress(2.0)
+            if self.isCanceled():
+                return False
+
+            candidates = dem_selector.candidate_datasets(south, north, west, east)
+            if not candidates:
+                raise RuntimeError(
+                    "No DEM dataset fits this bounding box. Zoom in to a "
+                    "smaller area and try again."
+                )
+
+            dem_path = os.path.join(self.out_root, "dem.tif")
+            chosen = None
+            errors = []
+            for cand in candidates:
+                if self.isCanceled():
+                    return False
+                try:
+                    dem_selector.download_dem(
+                        cand, (south, north, west, east),
+                        self.api_key, dem_path, progress_cb=self._progress_cb,
+                    )
+                    chosen = cand
+                    break
+                except Exception as e:  # try the next coarser dataset
+                    label = "%s@%sm" % (
+                        cand.get("value", "?"), cand.get("res_m", "?"))
+                    errors.append("%s: %s" % (label, e))
+                    continue
+
+            if chosen is None:
+                raise RuntimeError(
+                    "All DEM candidates failed:\n  " + "\n  ".join(errors)
+                )
+
+            self.setProgress(35.0)
+            if self.isCanceled():
+                return False
+
+            # ---- Stage 2: reproject DEM -> local UTM (metric) ---------------
+            centroid_lon = (west + east) / 2.0
+            centroid_lat = (south + north) / 2.0
+            utm_epsg = rem_engine.utm_epsg_for(centroid_lon, centroid_lat)
+
+            dem_utm_path = os.path.join(self.out_root, "dem_utm.tif")
+            processing.run(
+                "gdal:warpreproject",
+                {
+                    "INPUT": dem_path,
+                    "SOURCE_CRS": QgsCoordinateReferenceSystem("EPSG:4326"),
+                    "TARGET_CRS": QgsCoordinateReferenceSystem("EPSG:%d" % utm_epsg),
+                    "RESAMPLING": 1,          # 1 = bilinear
+                    "NODATA": None,
+                    "TARGET_RESOLUTION": None,
+                    "OPTIONS": "",
+                    "DATA_TYPE": 0,           # 0 = keep input type
+                    "TARGET_EXTENT": None,
+                    "MULTITHREADING": False,
+                    "OUTPUT": dem_utm_path,
+                },
+            )
+            if not os.path.exists(dem_utm_path):
+                raise RuntimeError("DEM reprojection to UTM failed (no output).")
+
+            self.setProgress(50.0)
+            if self.isCanceled():
+                return False
+
+            # ---- Stage 3: river centerline ----------------------------------
+            manual_layer = None
+            if self.manual_centerline_path:
+                # Re-open the file as a throwaway vector layer for centerline
+                # logic. This is a NEW layer object (not added to the project),
+                # so it's safe to construct off the main thread.
+                manual_layer = QgsVectorLayer(
+                    self.manual_centerline_path, "manual_centerline", "ogr"
+                )
+                if not manual_layer.isValid():
+                    manual_layer = None
+
+            centerline_shp = centerline_mod.get_centerline(
+                (south, north, west, east),
+                dem_utm_path,
+                manual_layer=manual_layer,
+            )
+            if not centerline_shp or not os.path.exists(centerline_shp):
+                raise RuntimeError(
+                    "Could not obtain a river centerline (OSM/Overpass empty, "
+                    "GRASS fallback failed, no manual layer)."
+                )
+
+            self.setProgress(60.0)
+            if self.isCanceled():
+                return False
+
+            # ---- Stage 4: make the REM --------------------------------------
+            rem_out = rem_engine.make_rem(
+                dem_utm_path,
+                centerline_shp,
+                self.out_root,
+                progress_cb=self._progress_cb,
+            )
+            if not rem_out or not rem_out.get("rem_tif") \
+                    or not os.path.exists(rem_out["rem_tif"]):
+                raise RuntimeError("REM generation produced no output raster.")
+
+            self.setProgress(100.0)
+
+            # ---- Stash results for finished() (main thread) -----------------
+            self.results = {
+                "rem_tif": rem_out.get("rem_tif"),
+                "viz_tif": rem_out.get("viz_tif"),
+                "dataset": chosen.get("value"),
+                "res_m": chosen.get("res_m"),
+                "is_dsm": chosen.get("is_dsm", False),
+                "engine": rem_out.get("engine", "unknown"),
+                "out_dir": self.out_root,
+            }
+            return True
+
+        except Exception:
+            # Capture the full traceback as a string; surface it in finished().
+            self.exc = traceback.format_exc()
+            return False
+
+    # -- callback (MAIN thread) ----------------------------------------------
+
+    def finished(self, result):
+        """Add + style layers and report to the message bar — MAIN thread only.
+
+        `result` is the bool run() returned. On success we add the raw REM
+        (styled) and, if present, the riverrem viz on top, then post an info
+        message naming the dataset/resolution/engine actually used. On failure
+        or cancel we post a warning with the captured error (non-blocking).
+        """
+        from qgis.utils import iface  # imported here so the module imports clean
+
+        if result and self.results:
+            try:
+                styling.load_results(self.results)
+            except Exception:
+                # Don't let a styling hiccup swallow the success message.
+                pass
+
+            dsm_note = " (DSM)" if self.results.get("is_dsm") else ""
+            res = self.results.get("res_m")
+            res_txt = ("%s m" % res) if res is not None else "?"
+            msg = "Used %s @ %s%s via %s" % (
+                self.results.get("dataset", "?"),
+                res_txt,
+                dsm_note,
+                self.results.get("engine", "?"),
+            )
+            if iface is not None:
+                iface.messageBar().pushMessage(
+                    "River REM", msg, level=Qgis.Info, duration=12
+                )
+            return
+
+        # Failure / cancellation path.
+        if self.isCanceled():
+            detail = "Canceled before completion."
+        else:
+            detail = self.exc or "Unknown error (no traceback captured)."
+
+        # Keep the message bar line short; the full traceback goes to the log.
+        first_line = detail.strip().splitlines()[-1] if detail.strip() else detail
+        if iface is not None:
+            iface.messageBar().pushMessage(
+                "River REM", "Failed: %s" % first_line,
+                level=Qgis.Warning, duration=0,
+            )
+        QgsProject.instance()  # touch to keep import used; harmless on main thread
+        # Log full detail for debugging.
+        try:
+            from qgis.core import QgsMessageLog
+            QgsMessageLog.logMessage(detail, MESSAGE_CATEGORY, level=Qgis.Warning)
+        except Exception:
+            pass
+
+    @staticmethod
+    def tr(message):
+        return QCoreApplication.translate("RemTask", message)

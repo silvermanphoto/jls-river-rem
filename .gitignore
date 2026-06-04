@@ -1,0 +1,20 @@
+# River REM — repo ignores
+
+# Per-run REM outputs (regenerable rasters; can be large)
+rem_outputs/
+
+# DEM / REM rasters and their world files
+*.tif
+*.tfw
+
+# Python caches
+__pycache__/
+*.pyc
+
+# macOS cruft
+.DS_Store
+
+# --- API KEY ---
+# The OpenTopography API key lives ONLY in QGIS QSettings
+# (org "JoelSilverman", app "RiverREM", key "opentopography/api_key").
+# It is NEVER stored in this repo. Nothing here should ever contain it.
