@@ -178,9 +178,9 @@ class RiverRemPlugin:
             )
             return
 
-        # Output root: per-project rem_outputs/ under the project dir if saved,
-        # else the plugin folder's parent (the project root for this build).
-        out_root = self._output_root()
+        # Output root: a per-run rem_outputs/<slug>_<timestamp>/ subfolder so we
+        # never litter the user's project directory with bare dem.tif/REM files.
+        out_root = self._run_output_dir(south, north, west, east)
 
         # Optional manual centerline: the active line layer, only if the toggle is on.
         use_selected = get_use_selected_layer()
@@ -208,13 +208,30 @@ class RiverRemPlugin:
 
     # -- helpers ---------------------------------------------------------------
 
-    def _output_root(self):
-        """Where rem_outputs/ should live: the saved project's dir, else the package parent."""
+    def _output_base(self):
+        """Base dir for rem_outputs/: the saved project's dir, else the package parent."""
         project_path = QgsProject.instance().homePath()
         if project_path:
             return project_path
         # Fall back to the project root that contains this package.
         return os.path.dirname(_PLUGIN_DIR)
+
+    def _run_output_dir(self, south, north, west, east):
+        """Create and return a per-run rem_outputs/<lat>_<lon>_<timestamp>/ folder.
+
+        Keeps each run's DEM / centerline / REM together and out of the user's
+        project directory. Lat/lon are the bbox centre, signed, so the folder is
+        self-describing.
+        """
+        import datetime
+
+        lat = (south + north) / 2.0
+        lon = (west + east) / 2.0
+        stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        slug = "rem_{:.4f}_{:.4f}_{}".format(lat, lon, stamp)
+        run_dir = os.path.join(self._output_base(), "rem_outputs", slug)
+        os.makedirs(run_dir, exist_ok=True)
+        return run_dir
 
     def _message(self, text, level=None):
         """Push a non-blocking message to the QGIS message bar."""

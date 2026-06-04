@@ -32,6 +32,12 @@ from osgeo import ogr, osr
 OVERPASS_URL = "https://overpass-api.de/api/interpreter"
 OVERPASS_TIMEOUT_S = 90          # client-side socket timeout
 OVERPASS_QL_TIMEOUT_S = 60       # server-side [timeout:NN] budget in the QL
+# overpass-api.de's Apache front returns HTTP 406 for the default
+# "python-requests/x.y" User-Agent, so we MUST send an identifying UA or every
+# query silently looks like "no waterways". Keep a real UA here.
+OVERPASS_HEADERS = {
+    "User-Agent": "QGIS-River-REM-plugin/0.1 (+https://github.com/silvermanphoto)"
+}
 
 # Which waterway tag values count as a usable centerline. Anchored regex so we
 # match the whole value, not a substring.
@@ -67,7 +73,8 @@ def overpass_centerline(s, n, w, e, out_shp):
 
     try:
         resp = requests.post(
-            OVERPASS_URL, data={"data": query}, timeout=OVERPASS_TIMEOUT_S
+            OVERPASS_URL, data={"data": query}, headers=OVERPASS_HEADERS,
+            timeout=OVERPASS_TIMEOUT_S,
         )
         resp.raise_for_status()
         payload = resp.json()
