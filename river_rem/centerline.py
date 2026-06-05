@@ -23,7 +23,7 @@ import os
 import tempfile
 
 import requests
-from osgeo import ogr, osr
+from osgeo import ogr, osr, gdal
 
 
 # --- tunables (Joel iterates by number) -------------------------------------
@@ -161,9 +161,12 @@ def _flatten_to_linestrings(geom):
     return out
 
 
-def _write_lines_shapefile(line_geoms, out_shp, epsg=4326):
+def _write_lines_shapefile(line_geoms, out_shp, epsg=4326, srs=None):
     """Write a list of coordinate-lists as LineString features into an ESRI
     Shapefile. Overwrites any existing file at ``out_shp``.
+
+    Pass an explicit ``srs`` (osr.SpatialReference) to set the layer CRS exactly
+    (e.g. the DEM's UTM zone); otherwise ``epsg`` is used.
 
     Returns the path on success, or ``None`` if no feature was written.
     """
@@ -184,8 +187,9 @@ def _write_lines_shapefile(line_geoms, out_shp, epsg=4326):
     if ds is None:
         return None
 
-    srs = osr.SpatialReference()
-    srs.ImportFromEPSG(epsg)
+    if srs is None:
+        srs = osr.SpatialReference()
+        srs.ImportFromEPSG(epsg)
 
     layer_name = os.path.splitext(os.path.basename(out_shp))[0]
     layer = ds.CreateLayer(layer_name, srs, ogr.wkbLineString)
@@ -375,6 +379,65 @@ def _layer_epsg(layer, default=4326):
 
 
 # ---------------------------------------------------------------------------
+# CRS reconciliation — the centerline MUST match the DEM's CRS
+# ---------------------------------------------------------------------------
+def _ensure_dem_crs(centerline_shp, dem_path, out_shp):
+    """Return a centerline shapefile in the DEM's CRS.
+
+    The OSM/Overpass provider writes EPSG:4326 (lon/lat) and a manual layer can
+    be in any CRS, but ``native_rem`` samples the DEM (UTM, metres) assuming the
+    centerline shares its CRS — so an unreprojected line lands entirely off the
+    grid ("no centerline samples fell on valid DEM pixels"). This reprojects the
+    line into the DEM's CRS. If it already matches (e.g. the GRASS provider, run
+    on the UTM DEM), the input path is returned unchanged.
+
+    Uses traditional (x=lon/easting, y=lat/northing) axis order on both ends so
+    ``TransformPoint`` is fed coordinates in the order the geometry stores them
+    (the GDAL 3 authority-axis-order trap, which otherwise swaps lat/lon).
+    """
+    if not centerline_shp or not os.path.isfile(centerline_shp) or not dem_path:
+        return centerline_shp
+    try:
+        dem = gdal.Open(dem_path)
+        dem_srs = osr.SpatialReference()
+        dem_srs.ImportFromWkt(dem.GetProjection())
+        dem = None
+
+        src = ogr.Open(centerline_shp)
+        layer = src.GetLayer(0)
+        src_srs = layer.GetSpatialRef()
+        if src_srs is None or dem_srs.IsSame(src_srs):
+            src = None
+            return centerline_shp  # already in (or indistinguishable from) DEM CRS
+
+        src_srs.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
+        dem_srs.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
+        ct = osr.CoordinateTransformation(src_srs, dem_srs)
+
+        line_geoms = []
+        for feat in layer:
+            geom = feat.GetGeometryRef()
+            if geom is None:
+                continue
+            for coords in _flatten_to_linestrings(geom):
+                tc = []
+                for x, y in coords:
+                    p = ct.TransformPoint(x, y)  # (x=lon, y=lat) -> (easting, northing)
+                    tc.append((p[0], p[1]))
+                if len(tc) >= 2:
+                    line_geoms.append(tc)
+        src = None
+
+        if not line_geoms:
+            return centerline_shp
+        return _write_lines_shapefile(line_geoms, out_shp, srs=dem_srs) or centerline_shp
+    except Exception:
+        # On any reprojection hiccup, return the original; native_rem will report
+        # the off-grid symptom, which is still better than a silent swap.
+        return centerline_shp
+
+
+# ---------------------------------------------------------------------------
 # Orchestrator
 # ---------------------------------------------------------------------------
 def get_centerline(bbox4326, dem_utm_path, manual_layer=None):
@@ -400,39 +463,44 @@ def get_centerline(bbox4326, dem_utm_path, manual_layer=None):
     # Outputs live alongside the DEM so a run folder stays self-contained.
     out_dir = os.path.dirname(dem_utm_path) if dem_utm_path else tempfile.gettempdir()
 
+    raw = None
+
     # 1) Manual override (settings toggle handled by the caller — if a layer is
     #    handed in, use it directly).
     if manual_layer is not None:
         manual_path = _manual_layer_path(manual_layer)
         if manual_path and os.path.exists(manual_path):
-            return manual_path
-        # A manual layer that resolves to no usable path is a caller error worth
-        # surfacing rather than silently overriding; fall through to OSM so the
-        # run still has a chance to succeed.
+            raw = manual_path
+        # A manual layer that resolves to no usable path falls through to OSM so
+        # the run still has a chance to succeed.
 
-    # 2) OSM via our own Overpass query.
-    osm_shp = os.path.join(out_dir, "centerline.shp")
-    try:
-        result = overpass_centerline(s, n, w, e, osm_shp)
-    except Exception:
-        result = None
-    if result:
-        return result
+    # 2) OSM via our own Overpass query (writes EPSG:4326).
+    if raw is None:
+        osm_shp = os.path.join(out_dir, "centerline.shp")
+        try:
+            raw = overpass_centerline(s, n, w, e, osm_shp)
+        except Exception:
+            raw = None
 
-    # 3) DEM-derived (GRASS hydrology).
-    grass_shp = os.path.join(out_dir, "centerline.shp")  # same canonical name
-    try:
-        result = grass_centerline(dem_utm_path, grass_shp)
-    except Exception:
-        result = None
-    if result:
-        return result
+    # 3) DEM-derived (GRASS hydrology — already in the DEM's CRS).
+    if raw is None:
+        grass_shp = os.path.join(out_dir, "centerline.shp")  # same canonical name
+        try:
+            raw = grass_centerline(dem_utm_path, grass_shp)
+        except Exception:
+            raw = None
 
-    raise RuntimeError(
-        "Could not obtain a river centerline: Overpass returned no waterways "
-        "and the DEM-derived (GRASS) fallback failed. Try a view that contains "
-        "a mapped river, or supply a manual centerline layer in settings."
-    )
+    if raw is None:
+        raise RuntimeError(
+            "Could not obtain a river centerline: Overpass returned no waterways "
+            "and the DEM-derived (GRASS) fallback failed. Try a view that contains "
+            "a mapped river, or supply a manual centerline layer in settings."
+        )
+
+    # Reproject into the DEM's CRS so native_rem's samples land on the grid.
+    # (No-op when the provider already matched, e.g. GRASS.)
+    demcrs_shp = os.path.join(out_dir, "centerline_demcrs.shp")
+    return _ensure_dem_crs(raw, dem_utm_path, demcrs_shp)
 
 
 def _manual_layer_path(manual_layer):
