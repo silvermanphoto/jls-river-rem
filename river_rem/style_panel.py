@@ -168,18 +168,41 @@ class StylePanel(QDockWidget):
             "Styling: <b>{}</b><br><span style='color:#71726d'>{}</span>".format(
                 self._rem.name(), run))
 
+        # Sync every control to the targeted layer's ACTUAL style (recorded as
+        # custom properties when it was styled) so the panel reflects what's on
+        # screen and edits start from there. Guarded so these setValue calls
+        # don't fire the apply handlers.
         self._loading = True
-        if self._hs is not None:
-            self._op.setValue(int(round(self._hs.opacity() * 100)))
-        # Reflect the capped default ramp (styling.DEFAULT_VMAX_M) in the slider,
-        # so "Near-river emphasis" shows where the loaded REM actually sits.
+        rem, hs = self._rem, self._hs
+
+        pal = rem.customProperty("river_rem/palette", styling.DEFAULT_PALETTE)
+        self._select_combo(self._palette, str(pal))
+
+        # Emphasis from the stored vmax (fall back to the capped default).
         dm = self._data_max or 0.0
-        cap = min(dm, styling.DEFAULT_VMAX_M) if dm > 0 else styling.DEFAULT_VMAX_M
-        if dm > 0 and cap < dm:
-            e = 1.0 - (cap / dm) ** (2.0 / 3.0)
-        else:
-            e = 0.0
+        vmax = rem.customProperty("river_rem/vmax", None)
+        try:
+            vmax = float(vmax) if vmax is not None else None
+        except (TypeError, ValueError):
+            vmax = None
+        if vmax is None:
+            vmax = min(dm, styling.DEFAULT_VMAX_M) if dm > 0 else styling.DEFAULT_VMAX_M
+        e = 1.0 - (vmax / dm) ** (2.0 / 3.0) if (dm > 0 and vmax < dm) else 0.0
         self._emph.setValue(int(round(max(0.0, min(1.0, e)) * 100)))
+
+        # Relief Z, sun azimuth, opacity from the hillshade.
+        if hs is not None:
+            z = hs.customProperty("river_rem/z", styling.HILLSHADE_Z_FACTOR)
+            az = hs.customProperty("river_rem/azimuth", styling.HILLSHADE_AZIMUTH)
+            try:
+                self._z_spin.setValue(float(z))
+            except (TypeError, ValueError):
+                pass
+            try:
+                self._az.setValue(int(round(float(az))))
+            except (TypeError, ValueError):
+                pass
+            self._op.setValue(int(round(hs.opacity() * 100)))
         self._loading = False
 
     # -- value mapping ----------------------------------------------------------
@@ -243,6 +266,9 @@ class StylePanel(QDockWidget):
                             if ch == rem_node), 0)
                 parent.insertLayer(pos, hs)
                 self._hs = hs
+        if self._hs is not None:
+            self._hs.setCustomProperty("river_rem/z", z)
+            self._hs.setCustomProperty("river_rem/azimuth", az)
         self._refresh_canvas()
 
     def _on_opacity(self, value):

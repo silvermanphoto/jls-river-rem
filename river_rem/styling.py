@@ -30,6 +30,8 @@ from qgis.core import (
     QgsColorRampShader,
     QgsRasterShader,
     QgsSingleBandPseudoColorRenderer,
+    QgsLayerTreeGroup,
+    QgsLayerTreeLayer,
 )
 
 
@@ -161,6 +163,11 @@ def apply_rem_pseudocolor(layer, palette=None, vmin=None, vmax=None):
     layer.setRenderer(renderer)
     # Multiply over whatever's beneath (the hillshade) for the sculpted look.
     layer.setBlendMode(QPainter.CompositionMode_Multiply)
+    # Record the applied style so the Style panel can reflect this layer's real
+    # state when it (re)targets — controls then show what's on screen.
+    layer.setCustomProperty("river_rem/palette", palette or DEFAULT_PALETTE)
+    layer.setCustomProperty("river_rem/vmin", float(vmin))
+    layer.setCustomProperty("river_rem/vmax", float(vmax))
     layer.triggerRepaint()
     return layer
 
@@ -262,6 +269,8 @@ def load_results(results):
     if hs_path:
         hs_layer = QgsRasterLayer(hs_path, "hillshade")
         if hs_layer.isValid():
+            hs_layer.setCustomProperty("river_rem/z", HILLSHADE_Z_FACTOR)
+            hs_layer.setCustomProperty("river_rem/azimuth", HILLSHADE_AZIMUTH)
             project.addMapLayer(hs_layer, False)
             group.addLayer(hs_layer)
             added.append(hs_layer)
@@ -283,17 +292,38 @@ def load_results(results):
 # Helper for the live Style panel: find the REM the user is looking at
 # ---------------------------------------------------------------------------
 
+def _first_visible_rem(node):
+    """Depth-first the layer tree (top->bottom); return the first checked REM
+    layer inside a checked group — i.e. the REM the user actually sees on top."""
+    for ch in node.children():
+        if isinstance(ch, QgsLayerTreeGroup):
+            if ch.itemVisibilityChecked():
+                found = _first_visible_rem(ch)
+                if found is not None:
+                    return found
+        elif isinstance(ch, QgsLayerTreeLayer):
+            layer = ch.layer()
+            if (layer is not None and "REM" in layer.name()
+                    and ch.itemVisibilityChecked()):
+                return layer
+    return None
+
+
 def find_current_rem(iface):
     """Locate the REM to restyle and its companions.
 
-    Prefers the active layer when it's a REM, else the most-recently-added REM
-    layer. Returns (rem_layer, hillshade_layer_or_None, dem_utm_path_or_None).
-    The hillshade is matched by name within the REM's own run folder.
+    Targeting order: the active layer if it's a REM, else the topmost VISIBLE
+    REM in the layer tree (what's on screen — NOT an arbitrary dict-order layer,
+    which previously made the panel edit a hidden group), else any REM.
+    Returns (rem_layer, hillshade_layer_or_None, dem_utm_path_or_None). The
+    hillshade is matched by the REM's own run folder.
     """
     project = QgsProject.instance()
 
     active = iface.activeLayer() if iface is not None else None
     rem = active if (active is not None and "REM" in active.name()) else None
+    if rem is None:
+        rem = _first_visible_rem(project.layerTreeRoot())
     if rem is None:
         rems = [l for l in project.mapLayers().values() if "REM" in l.name()]
         rem = rems[-1] if rems else None
