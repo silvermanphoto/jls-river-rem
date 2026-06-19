@@ -186,3 +186,54 @@ loading + styling, and the dependency bootstrap.
 - RiverREM — https://opentopography.github.io/RiverREM/ ,
   https://github.com/OpenTopography/RiverREM
 - QGIS PyQGIS Developer Cookbook — https://docs.qgis.org/3.40/en/docs/pyqgis_developer_cookbook/
+
+## Lessons learned (2026-06-19 build session — through v0.1.12)
+
+Hard-won, non-obvious findings. Read before changing the matching code.
+
+- **PyPI `riverrem` is a broken 0.0.1 relic** — bare `import gdal`, no
+  `centerline_shp`, crashes < 1M px, viz breaks on seaborn 0.10. Engine is
+  **native** (`rem_engine.native_rem`: numpy + scipy `cKDTree` IDW + GDAL). The
+  modern RiverREM is GitHub-only and drags in osmnx — declined. Do not
+  `pip install riverrem`. (Bundled GDAL 3.3.2 runs the native math fine despite
+  RiverREM's declared `gdal>=3.7`.)
+- **Overpass 406:** overpass-api.de's Apache blocks the default
+  `python-requests` User-Agent → `raise_for_status()` turned it into a swallowed
+  "no waterways". Always send `OVERPASS_HEADERS` (a real User-Agent).
+- **Centerline CRS:** OSM/Overpass returns EPSG:4326, but `native_rem` samples a
+  UTM DEM — an unreprojected line lands off-grid ("no samples on valid pixels").
+  `get_centerline` reprojects into the DEM CRS using **traditional GIS axis
+  order** (the GDAL 3 lat/lon-swap trap).
+- **USGS1m arrives in a projected metre CRS (UTM), not 4326** — so the UTM warp
+  must NOT hard-code `SOURCE_CRS=4326`; use the DEM's own embedded CRS.
+- **USGS1m is academic-access-gated.** A `.edu` account alone shows "Registered
+  User" (Global 10m+) and 401s on USGS1m; the user must click **Enable Access**
+  on a USGS 3DEP dataset page (1-yr academic grant, 250 km²/request cap). The
+  selector tries 1m first and falls back to 10m; the message bar names what was
+  skipped and why.
+- **Large 1m downloads truncate silently.** They stream with **no
+  Content-Length** and the server can close early with no HTTP error → a partial
+  GeoTIFF that renders as only a band of the canvas. `download_dem` validates
+  each attempt (Content-Length AND a GDAL read of the last tile) and retries 3×.
+  No size header also means no native % — the bar uses a byte-based creep.
+- **GRASS 7.8 vector line export is broken** on this build: `r.stream.extract`'s
+  `stream_vector` and `r.to.vect type=line` both come back empty/zero-length,
+  while the stream **raster** is solid. `grass_centerline` therefore reads the
+  stream raster with GDAL and emits channel **points** (no GRASS vector export);
+  `native_rem`'s densifier accepts Point geometry.
+- **Style panel must target the VISIBLE REM.** With several REM groups stacked
+  and no active layer, picking an arbitrary dict-order layer made the panel edit
+  a hidden group (sliders looked dead). `find_current_rem` now takes the topmost
+  *checked* REM in the layer tree; applied style is saved as layer custom
+  properties so the panel reflects the on-screen look.
+- **Default "look":** cap the color ramp at ~15 m above the river
+  (`DEFAULT_VMAX_M`) and keep hillshade `Z≈1` — letting the ramp run to the full
+  data max washes canyons to grey (the source REM look tops out ~10–12 m).
+- **QGIS 4.0 = PyQt6.** The plugin won't load there as-is: `qgisMaximumVersion`
+  cap + unscoped Qt enums (`Qt.Horizontal`, `QLineEdit.Password`, …) + `QAction`
+  moved to QtGui + likely `grass7`→`grass8` IDs. Scoped enums work on PyQt5 too,
+  so a single cross-version codebase is feasible — needs QGIS 4 + MCP to verify.
+- **QGIS MCP** (`execute_code`) only reaches the GUI app when its server is
+  running; the headless QGIS-LTR/QGIS-4 binaries don't bootstrap standalone
+  (4.0's hard-codes a CI stdlib path). Offscreen testing uses the QGIS-LTR python
+  with `PYTHONPATH` to the bundle's `Resources/python(/plugins)`.
