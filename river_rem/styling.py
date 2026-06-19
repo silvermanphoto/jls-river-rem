@@ -34,23 +34,45 @@ from qgis.core import (
 
 
 # ---------------------------------------------------------------------------
-# Palettes — low (river, ~0) -> high (terraces). Edit / add freely.
-# Approximations of cmocean 'topo', a cyanotype blue, seaborn 'mako', 'magma'.
+# Palettes — low (river, ~0) -> high (terraces).
+# Two hand-built ramps, plus the full viridis-family of scientific colormaps
+# sampled live from seaborn/matplotlib (both bundled in QGIS) so they match the
+# canonical data exactly. Add a name to _CMAP_NAMES to expose more.
 # ---------------------------------------------------------------------------
-PALETTES = {
+_CUSTOM_PALETTES = {
     # OpenTopography / RiverREM canonical: blue channel -> green -> tan -> cream.
     "topo":      ["#1f4a6e", "#2f7d97", "#5bb0a0", "#9ec98c",
                   "#cbc98c", "#e6dbbb", "#f7f2e6"],
     # Dan Coe blueprint look: deep prussian blue -> pale cyan -> white.
     "cyanotype": ["#082b45", "#0f4c6b", "#2d7397", "#5e9dc0",
                   "#9ac3da", "#cfe3ef", "#f0f7fb"],
-    # Vivid purple -> indigo -> teal -> pale green.
-    "mako":      ["#0b0405", "#1b2a4a", "#23547e", "#2a8a8e",
-                  "#23b07f", "#5fd07a", "#def5e5"],
-    # Lava: black -> magenta -> orange -> pale gold.
-    "magma":     ["#000004", "#1c1044", "#4f127b", "#812581",
-                  "#b5367a", "#e55064", "#fb8761", "#fec287", "#fcfdbf"],
 }
+
+# The viridis family (matplotlib + seaborn names). Order = dropdown order.
+_CMAP_NAMES = ["viridis", "magma", "inferno", "plasma",
+               "cividis", "turbo", "rocket", "mako"]
+
+
+def _sample_cmap(name, n=10):
+    """Sample a named seaborn/matplotlib colormap into n hex stops (low->high)."""
+    import seaborn as sns  # bundled; color_palette(name, n) works in seaborn 0.10
+    pal = sns.color_palette(name, n)
+    return ["#%02x%02x%02x" % tuple(int(round(c * 255)) for c in rgb[:3])
+            for rgb in pal]
+
+
+def _build_palettes():
+    """topo + cyanotype, then every viridis-family map we can sample."""
+    pals = dict(_CUSTOM_PALETTES)
+    for name in _CMAP_NAMES:
+        try:
+            pals[name] = _sample_cmap(name)
+        except Exception:
+            pass  # a missing colormap just doesn't appear; never breaks load
+    return pals
+
+
+PALETTES = _build_palettes()
 
 # The look loaded by default. Change this one word to retaste every new REM.
 DEFAULT_PALETTE = "topo"
