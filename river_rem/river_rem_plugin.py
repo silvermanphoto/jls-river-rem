@@ -64,6 +64,9 @@ class RiverRemPlugin:
         self.actions = []
         self._action_run = None
         self._action_settings = None
+        self._action_style = None
+        self._style_panel = None
+        self._task = None
 
     # -- lifecycle -------------------------------------------------------------
 
@@ -80,6 +83,17 @@ class RiverRemPlugin:
         self.iface.addToolBarIcon(self._action_run)
         self.iface.addPluginToRasterMenu(_MENU_LABEL, self._action_run)
         self.actions.append(self._action_run)
+
+        # Live Style panel action: plugin menu only.
+        self._action_style = QAction(
+            "River REM Style…", self.iface.mainWindow()
+        )
+        self._action_style.setToolTip(
+            "Palette + hillshade controls for the loaded REM (no re-download)"
+        )
+        self._action_style.triggered.connect(self.open_style_panel)
+        self.iface.addPluginToRasterMenu(_MENU_LABEL, self._action_style)
+        self.actions.append(self._action_style)
 
         # Settings action: plugin menu only.
         self._action_settings = QAction(
@@ -103,6 +117,14 @@ class RiverRemPlugin:
         self.actions = []
         self._action_run = None
         self._action_settings = None
+        self._action_style = None
+        if self._style_panel is not None:
+            try:
+                self.iface.removeDockWidget(self._style_panel)
+                self._style_panel.deleteLater()
+            except Exception:
+                pass
+            self._style_panel = None
 
     # -- settings --------------------------------------------------------------
 
@@ -110,6 +132,25 @@ class RiverRemPlugin:
         """Show the settings dialog (API key + centerline override)."""
         dlg = SettingsDialog(self.iface.mainWindow())
         dlg.exec_()
+
+    # -- live style panel ------------------------------------------------------
+
+    def _ensure_style_panel(self):
+        """Lazily create + dock the live Style panel."""
+        if self._style_panel is None:
+            from .style_panel import StylePanel
+            from qgis.PyQt.QtCore import Qt
+
+            self._style_panel = StylePanel(self.iface, self.iface.mainWindow())
+            self.iface.addDockWidget(Qt.RightDockWidgetArea, self._style_panel)
+        return self._style_panel
+
+    def open_style_panel(self):
+        """Show the Style panel and point it at the current REM."""
+        panel = self._ensure_style_panel()
+        panel.show()
+        panel.raise_()
+        panel.refresh_target()
 
     # -- the one-button flow ---------------------------------------------------
 
@@ -199,6 +240,8 @@ class RiverRemPlugin:
         )
         # Keep a reference so the task isn't garbage-collected mid-run.
         self._task = task
+        # When the REM finishes loading, pop the live Style panel on the new layer.
+        task.taskCompleted.connect(self.open_style_panel)
         QgsApplication.taskManager().addTask(task)
 
         self._message(

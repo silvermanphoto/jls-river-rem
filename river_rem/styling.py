@@ -152,8 +152,11 @@ def _raster_min_max(path):
 # Hillshade
 # ---------------------------------------------------------------------------
 
-def _make_hillshade(dem_path, out_path):
+def _make_hillshade(dem_path, out_path, z_factor=None, azimuth=None, altitude=None):
     """Write a grayscale hillshade GeoTIFF from a (UTM) DEM via gdaldem.
+
+    z_factor/azimuth/altitude default to the module constants; the Style panel
+    passes a live z_factor to dial relief strength up and down.
 
     Returns out_path on success, or None.
     """
@@ -161,9 +164,9 @@ def _make_hillshade(dem_path, out_path):
         return None
     try:
         opts = gdal.DEMProcessingOptions(
-            azimuth=HILLSHADE_AZIMUTH,
-            altitude=HILLSHADE_ALTITUDE,
-            zFactor=HILLSHADE_Z_FACTOR,
+            azimuth=HILLSHADE_AZIMUTH if azimuth is None else azimuth,
+            altitude=HILLSHADE_ALTITUDE if altitude is None else altitude,
+            zFactor=HILLSHADE_Z_FACTOR if z_factor is None else z_factor,
             computeEdges=True,
         )
         ds = gdal.DEMProcessing(out_path, dem_path, "hillshade", options=opts)
@@ -225,3 +228,37 @@ def load_results(results):
             added.append(viz_layer)
 
     return added
+
+
+# ---------------------------------------------------------------------------
+# Helper for the live Style panel: find the REM the user is looking at
+# ---------------------------------------------------------------------------
+
+def find_current_rem(iface):
+    """Locate the REM to restyle and its companions.
+
+    Prefers the active layer when it's a REM, else the most-recently-added REM
+    layer. Returns (rem_layer, hillshade_layer_or_None, dem_utm_path_or_None).
+    The hillshade is matched by name within the REM's own run folder.
+    """
+    project = QgsProject.instance()
+
+    active = iface.activeLayer() if iface is not None else None
+    rem = active if (active is not None and "REM" in active.name()) else None
+    if rem is None:
+        rems = [l for l in project.mapLayers().values() if "REM" in l.name()]
+        rem = rems[-1] if rems else None
+    if rem is None:
+        return (None, None, None)
+
+    run_dir = os.path.dirname(rem.source().split("|")[0])
+    dem = os.path.join(run_dir, "dem_utm.tif")
+    dem = dem if os.path.isfile(dem) else None
+
+    hs = None
+    for l in project.mapLayers().values():
+        if l.name() == "hillshade" and os.path.dirname(l.source().split("|")[0]) == run_dir:
+            hs = l
+            break
+
+    return (rem, hs, dem)
