@@ -32,9 +32,10 @@ from .settings_dialog import SettingsDialog, get_api_key, get_use_selected_layer
 # --- Guardrail tuning knobs (km^2). Joel iterates by number — keep them here. --
 # Below this the view is so tight the DEM/centerline would be useless: zoom out.
 MIN_AREA_KM2 = 0.05
-# Above this the request is absurd (and would blow past every dataset cap): zoom in.
-# ~2000 km^2 per the locked plan.
-MAX_AREA_KM2 = 2000.0
+# Above this we refuse (and it would blow past dataset caps): zoom in. Raised to
+# 25,000 km^2 to unblock regional COP30 (30 m) scenes; native_rem chunks the
+# interpolation so the larger pixel counts stay within memory.
+MAX_AREA_KM2 = 25000.0
 
 _PLUGIN_DIR = os.path.dirname(__file__)
 _ICON_PATH = os.path.join(_PLUGIN_DIR, "icon.png")

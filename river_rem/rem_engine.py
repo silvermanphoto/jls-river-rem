@@ -168,6 +168,10 @@ IDW_POWER = 1.0
 # Small epsilon added to distances so a query point coincident with a sample
 # doesn't divide by zero.
 IDW_EPS = 1e-6
+# Pixels processed per IDW chunk. Bounds peak memory: each chunk holds only
+# (chunk x k) distance/index/elevation arrays, so a regional COP30 scene of tens
+# of millions of pixels stays well within RAM. 1e6 -> ~0.16 GB per block at k=20.
+NATIVE_CHUNK_PIXELS = 1_000_000
 
 
 def native_rem(dem_utm_path, centerline_shp, out_dir, progress_cb=None):
@@ -202,7 +206,7 @@ def native_rem(dem_utm_path, centerline_shp, out_dir, progress_cb=None):
     proj = ds.GetProjection()
     nodata = band.GetNoDataValue()
 
-    dem = band.ReadAsArray().astype("float64")
+    dem = band.ReadAsArray().astype("float32")  # float32 halves peak memory
     _progress(15.0)
 
     # Mask of valid DEM pixels (exclude NoData and non-finite).
@@ -261,43 +265,50 @@ def native_rem(dem_utm_path, centerline_shp, out_dir, progress_cb=None):
     _progress(45.0)
 
     # ----- 3. IDW-interpolate the river surface across the whole grid ------ #
-    # Build the KDTree on river-surface sample positions; query every valid DEM
-    # pixel for its k nearest samples and inverse-distance-weight their
-    # elevations into a river-surface estimate.
+    # Build the KDTree on river-surface sample positions, then query every valid
+    # DEM pixel for its k nearest samples and inverse-distance-weight their
+    # elevations. The query runs in CHUNKS so peak memory stays bounded on large
+    # (regional COP30) scenes — only NATIVE_CHUNK_PIXELS x k arrays exist at once.
     tree = cKDTree(s_xy)
 
-    # World XY of every valid DEM pixel (pixel centres).
-    vr, vc = np.where(valid_mask)
-    # Pixel-centre world coords: origin + (col+0.5)*pw, etc. (rotation-free DEMs).
-    qx = gt[0] + (vc + 0.5) * gt[1] + (vr + 0.5) * gt[2]
-    qy = gt[3] + (vc + 0.5) * gt[4] + (vr + 0.5) * gt[5]
-    query_xy = np.column_stack([qx, qy])
+    vr, vc = np.where(valid_mask)          # row/col of every valid pixel
+    n_valid = vr.shape[0]
 
     k = int(min(IDW_K, s_xy.shape[0]))
     if k < 1:
         k = 1
 
-    # scipy 1.5.x uses n_jobs=; newer scipy renamed it to workers=. Try the
-    # modern kwarg first, fall back to the old one, then to no kwarg — so this
-    # works across the scipy versions QGIS might ship.
-    dist, idx = _kdtree_query(tree, query_xy, k)
-    _progress(70.0)
+    river_surface = np.empty(n_valid, dtype="float32")
+    chunk = int(NATIVE_CHUNK_PIXELS)
+    for start in range(0, n_valid, chunk):
+        end = min(start + chunk, n_valid)
+        rc = vr[start:end]
+        cc = vc[start:end]
+        # Pixel-centre world coords for this block (rotation-free DEMs).
+        qx = gt[0] + (cc + 0.5) * gt[1] + (rc + 0.5) * gt[2]
+        qy = gt[3] + (cc + 0.5) * gt[4] + (rc + 0.5) * gt[5]
+        q_xy = np.column_stack([qx, qy])
 
-    # dist/idx are (N,) when k==1; promote to (N,1) for uniform handling.
-    if k == 1:
-        dist = dist[:, None]
-        idx = idx[:, None]
+        # scipy 1.5.x uses n_jobs=; newer renamed it workers=. _kdtree_query
+        # tries both, then neither — works across the scipy versions QGIS ships.
+        dist, idx = _kdtree_query(tree, q_xy, k)
+        if k == 1:
+            dist = dist[:, None]
+            idx = idx[:, None]
 
-    # Inverse-distance weights; eps avoids /0 at coincident points.
-    w = 1.0 / np.power(dist + IDW_EPS, IDW_POWER)
-    neigh_z = sample_z[idx]                         # (N, k) neighbour elevations
-    river_surface_flat = np.sum(w * neigh_z, axis=1) / np.sum(w, axis=1)
-    _progress(85.0)
+        w = 1.0 / np.power(dist + IDW_EPS, IDW_POWER)        # inverse-distance
+        neigh_z = sample_z[idx]                              # (block, k)
+        river_surface[start:end] = (np.sum(w * neigh_z, axis=1)
+                                    / np.sum(w, axis=1)).astype("float32")
+
+        # Progress across the chunked sweep: 45% -> 85%.
+        if n_valid:
+            _progress(45.0 + 40.0 * (end / float(n_valid)))
 
     # ----- 4. REM = DEM - interpolated river surface ----------------------- #
     out_nodata = -9999.0
     rem = np.full((ny, nx), out_nodata, dtype="float32")
-    rem[vr, vc] = (dem[vr, vc] - river_surface_flat).astype("float32")
+    rem[vr, vc] = (dem[vr, vc] - river_surface).astype("float32")
 
     # ----- 5. Write <demstem>_REM.tif -------------------------------------- #
     stem = os.path.splitext(os.path.basename(dem_utm_path))[0]

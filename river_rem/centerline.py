@@ -296,9 +296,13 @@ def grass_centerline(dem_utm_path, out_shp):
 
 
 def _grass_threshold_for_dem(dem_utm_path):
-    """Compute a flow-accumulation threshold in cells (~0.25 km2 of drainage),
-    floored at ``GRASS_MIN_THRESHOLD_CELLS``."""
-    target_area_m2 = 0.25 * 1_000_000  # 0.25 km2 in m^2 (tune for more/less network)
+    """Compute a flow-accumulation threshold in cells (~0.05 km2 of drainage),
+    floored at ``GRASS_MIN_THRESHOLD_CELLS``.
+
+    Lowered from 0.25 to 0.05 km2 so low-relief / small DEMs still yield a
+    channel network instead of an empty stream layer (the fixed 0.25 km2 value
+    extracted nothing on flat reaches)."""
+    target_area_m2 = 0.05 * 1_000_000  # 0.05 km2 in m^2 (tune for more/less network)
     try:
         from osgeo import gdal
 
