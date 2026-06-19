@@ -210,8 +210,9 @@ def download_dem(candidate: Dict, bbox, api_key: str, out_path: str,
         if status in (401, 403):
             msg = (f"OpenTopography rejected the request for {label} "
                    f"(HTTP {status}). The API key is missing, invalid, or not "
-                   f"authorized for this dataset (USGS1m can be access-gated). "
-                   f"Check the key in River REM Settings.")
+                   f"authorized for this dataset (USGS1m is academic-access-gated). "
+                   f"Check the key in River REM Settings."
+                   + (f" Server said: {detail}" if detail else ""))
         elif status == 429:
             msg = (f"OpenTopography rate limit hit for {label} (HTTP 429). "
                    f"Wait and retry, or use a higher-quota key.")

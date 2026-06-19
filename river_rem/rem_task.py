@@ -39,6 +39,21 @@ from . import styling
 MESSAGE_CATEGORY = "RiverREM"
 
 
+def _skip_reason(exc):
+    """A terse reason a DEM candidate was skipped, for the message bar."""
+    status = getattr(getattr(exc, "response", None), "status_code", None)
+    if status in (401, 403):
+        return "academic access required"
+    if status == 429:
+        return "rate-limited"
+    if status == 400:
+        return "area too large"
+    text = str(exc).lower()
+    if "empty" in text or "no coverage" in text:
+        return "no coverage here"
+    return "unavailable"
+
+
 class RemTask(QgsTask):
     """Runs DEM download -> UTM warp -> centerline -> REM in the background."""
 
@@ -116,6 +131,7 @@ class RemTask(QgsTask):
             dem_path = os.path.join(self.out_root, "dem.tif")
             chosen = None
             errors = []
+            skipped = []   # higher-res datasets tried-and-skipped before success
             for cand in candidates:
                 if self.isCanceled():
                     return False
@@ -130,6 +146,8 @@ class RemTask(QgsTask):
                     label = "%s@%sm" % (
                         cand.get("value", "?"), cand.get("res_m", "?"))
                     errors.append("%s: %s" % (label, e))
+                    skipped.append("%s (%s)" % (
+                        cand.get("value", "?"), _skip_reason(e)))
                     continue
 
             if chosen is None:
@@ -219,6 +237,7 @@ class RemTask(QgsTask):
                 "is_dsm": chosen.get("is_dsm", False),
                 "engine": rem_out.get("engine", "unknown"),
                 "out_dir": self.out_root,
+                "skipped": skipped,   # higher-res datasets that were unavailable
             }
             return True
 
@@ -255,9 +274,13 @@ class RemTask(QgsTask):
                 dsm_note,
                 self.results.get("engine", "?"),
             )
+            skipped = self.results.get("skipped") or []
+            if skipped:
+                msg += " — skipped higher-res: " + ", ".join(skipped)
+            level = Qgis.Warning if skipped else Qgis.Info
             if iface is not None:
                 iface.messageBar().pushMessage(
-                    "River REM", msg, level=Qgis.Info, duration=12
+                    "River REM", msg, level=level, duration=14
                 )
             return
 
