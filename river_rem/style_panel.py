@@ -171,6 +171,15 @@ class StylePanel(QDockWidget):
         self._loading = True
         if self._hs is not None:
             self._op.setValue(int(round(self._hs.opacity() * 100)))
+        # Reflect the capped default ramp (styling.DEFAULT_VMAX_M) in the slider,
+        # so "Near-river emphasis" shows where the loaded REM actually sits.
+        dm = self._data_max or 0.0
+        cap = min(dm, styling.DEFAULT_VMAX_M) if dm > 0 else styling.DEFAULT_VMAX_M
+        if dm > 0 and cap < dm:
+            e = 1.0 - (cap / dm) ** (2.0 / 3.0)
+        else:
+            e = 0.0
+        self._emph.setValue(int(round(max(0.0, min(1.0, e)) * 100)))
         self._loading = False
 
     # -- value mapping ----------------------------------------------------------

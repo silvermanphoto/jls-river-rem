@@ -169,7 +169,11 @@ class RemTask(QgsTask):
                 "gdal:warpreproject",
                 {
                     "INPUT": dem_path,
-                    "SOURCE_CRS": QgsCoordinateReferenceSystem("EPSG:4326"),
+                    # SOURCE_CRS omitted (None): use the DEM's OWN embedded CRS.
+                    # OpenTopography returns global DEMs in EPSG:4326/4269 but
+                    # USGS1m comes in a projected metre CRS (UTM) — hard-coding
+                    # 4326 mangled those into no output. None handles all cases.
+                    "SOURCE_CRS": None,
                     "TARGET_CRS": QgsCoordinateReferenceSystem("EPSG:%d" % utm_epsg),
                     "RESAMPLING": 1,          # 1 = bilinear
                     "NODATA": None,

@@ -37,6 +37,34 @@ GLOBALDEM_ENDPOINT = "https://portal.opentopography.org/API/globaldem"
 # Network timeout for the DEM download. Generous because high-res tiles can take
 # a while server-side to cut; tune here if downloads stall vs. time out. (s)
 _REQUEST_TIMEOUT = 300
+# How many times to retry a download that arrives truncated/unreadable. Large 1m
+# tiles occasionally stream short (server closes early) with no HTTP error, which
+# left a partial GeoTIFF that rendered as only a band of the canvas.
+_MAX_DOWNLOAD_ATTEMPTS = 3
+
+
+def _geotiff_reads_fully(path: str) -> bool:
+    """True if GDAL can open the file and read its LAST tile (so a truncated
+    download is caught). Lazy GDAL import keeps this module importable without it.
+    """
+    try:
+        from osgeo import gdal
+    except Exception:
+        return True  # can't validate without GDAL; don't block the download
+    try:
+        gdal.UseExceptions()
+        ds = gdal.Open(path)
+        if ds is None:
+            return False
+        band = ds.GetRasterBand(1)
+        nx, ny = ds.RasterXSize, ds.RasterYSize
+        # Reading the bottom-right corner forces the final tile/strip to decode;
+        # a truncated file raises here.
+        band.ReadAsArray(max(0, nx - 2), max(0, ny - 2), min(2, nx), min(2, ny))
+        ds = None
+        return True
+    except Exception:
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -183,13 +211,36 @@ def download_dem(candidate: Dict, bbox, api_key: str, out_path: str,
     url, params = _build_url_and_params(candidate, s, n, w, e, api_key)
     label = candidate["value"]
 
+    # Retry only transient truncation / network failures; auth/area/coverage
+    # errors raise immediately (no point retrying those).
+    last_transient = None
+    for attempt in range(1, _MAX_DOWNLOAD_ATTEMPTS + 1):
+        try:
+            _stream_one(url, params, out_path, label, progress_cb)
+        except _TruncatedDownload as exc:
+            last_transient = exc
+            continue
+        return out_path
+    raise RuntimeError(
+        f"{label}: download kept arriving truncated after "
+        f"{_MAX_DOWNLOAD_ATTEMPTS} attempts ({last_transient}). "
+        f"Try again, or zoom in to request a smaller (faster) tile."
+    )
+
+
+class _TruncatedDownload(Exception):
+    """Internal: a download that streamed short / unreadable (retryable)."""
+
+
+def _stream_one(url, params, out_path, label, progress_cb):
+    """One download attempt. Raises _TruncatedDownload on a short/unreadable
+    body or network error (retryable); requests.HTTPError / RuntimeError on the
+    permanent failures (auth, area-too-large, no-coverage, error payload)."""
     try:
         resp = requests.get(url, params=params, stream=True,
                             timeout=_REQUEST_TIMEOUT)
     except requests.RequestException as exc:
-        raise RuntimeError(
-            f"Network error contacting OpenTopography for {label}: {exc}"
-        ) from exc
+        raise _TruncatedDownload(f"network error: {exc}") from exc
 
     safe_url = _redact(resp.url) if resp is not None else _redact(url)
 
@@ -274,12 +325,20 @@ def download_dem(candidate: Dict, bbox, api_key: str, out_path: str,
         resp.close()
 
     # GeoTIFFs start with "II"/"MM" + 0x2A; if we got essentially nothing the
-    # request "succeeded" but produced no data — treat as an error so the caller
-    # falls through to the next candidate.
+    # request "succeeded" but produced no data — no coverage here, permanent.
     if written < 256:
         raise RuntimeError(
             f"OpenTopography returned an empty/too-small file for {label} "
             f"({written} bytes). The dataset likely has no coverage here."
         )
 
-    return out_path
+    # Truncation guard (the band-of-canvas bug): a short stream vs the advertised
+    # Content-Length, or a GeoTIFF that can't decode to its last tile, is a
+    # partial download — retryable.
+    if total_bytes > 0 and written < total_bytes:
+        raise _TruncatedDownload(
+            f"got {written} of {total_bytes} bytes for {label}")
+    if not _geotiff_reads_fully(out_path):
+        raise _TruncatedDownload(
+            f"{label} GeoTIFF was unreadable to its last tile ({written} bytes)")
+    return

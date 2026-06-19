@@ -80,7 +80,13 @@ DEFAULT_PALETTE = "topo"
 # Hillshade knobs (Joel iterates by number).
 HILLSHADE_AZIMUTH = 315.0     # light direction, degrees
 HILLSHADE_ALTITUDE = 45.0     # light height, degrees
-HILLSHADE_Z_FACTOR = 2.0      # vertical exaggeration; higher = more relief
+HILLSHADE_Z_FACTOR = 1.0      # vertical exaggeration; soft default = color reads
+
+# Default top of the color ramp, in metres above the river. The source REM look
+# (OpenSourceOptions / OpenTopography RiverREM) tops out around 10-12 m so the
+# near-river floodplain/terraces get the whole palette; letting it run to the
+# full data max (tens-to-hundreds of m in canyons) washes the colour to grey.
+DEFAULT_VMAX_M = 15.0
 
 
 # ---------------------------------------------------------------------------
@@ -117,7 +123,10 @@ def apply_rem_pseudocolor(layer, palette=None, vmin=None, vmax=None):
     if vmin is None:
         vmin = data_min if data_min is not None else -0.5
     if vmax is None:
-        vmax = data_max if (data_max is not None and data_max > 0) else 12.0
+        dm = data_max if (data_max is not None and data_max > 0) else 12.0
+        # Cap the default ramp near the river (DEFAULT_VMAX_M) so canyons don't
+        # spread the palette over hundreds of metres and wash out to grey.
+        vmax = min(dm, DEFAULT_VMAX_M)
     vmin = float(vmin)
     vmax = float(vmax)
     if vmax <= 0:
