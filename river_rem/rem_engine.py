@@ -381,10 +381,19 @@ def _densify_centerline(centerline_shp, step_m):
 
 
 def _collect_line_points(geom, step_m, out):
-    """Recursively densify a (Multi)LineString geometry into out (list of [x,y])."""
+    """Recursively densify a geometry into out (list of [x,y]).
+
+    Handles (Multi)LineString (densified at step_m) and also Point/MultiPoint —
+    the GRASS DEM-derived provider supplies channel sample points directly rather
+    than a polyline, and those are used as-is.
+    """
     gtype = geom.GetGeometryType()
-    # Normalize away the Z/M flags so 2.5D lines are handled the same.
+    # Normalize away the Z/M flags so 2.5D geometries are handled the same.
     flat = ogr.GT_Flatten(gtype) if hasattr(ogr, "GT_Flatten") else gtype
+
+    if flat == ogr.wkbPoint:
+        out.append([geom.GetX(), geom.GetY()])
+        return
 
     if flat == ogr.wkbLineString:
         n = geom.GetPointCount()

@@ -227,21 +227,27 @@ def _write_lines_shapefile(line_geoms, out_shp, epsg=4326, srs=None):
 # ---------------------------------------------------------------------------
 # DEM-derived provider (GRASS hydrology)
 # ---------------------------------------------------------------------------
+# Cap on channel points sampled from the GRASS stream raster. The IDW only needs
+# a well-distributed set of river-surface points, not every stream cell.
+GRASS_MAX_CENTERLINE_POINTS = 8000
+
+
 def grass_centerline(dem_utm_path, out_shp):
-    """Derive a centerline from a (UTM, metric) DEM via GRASS hydrology and
-    keep the longest extracted stream line.
+    """Derive river-channel reference points from a (UTM, metric) DEM via GRASS.
 
     Pipeline: ``grass7:r.watershed`` (flow accumulation) ->
-    ``grass7:r.stream.extract`` (threshold vectorization) -> keep longest line.
+    ``grass7:r.stream.extract`` (``stream_raster``) -> read the stream cells with
+    GDAL and emit their centres as a POINT shapefile in the DEM's CRS.
 
-    Args:
-        dem_utm_path: path to the reprojected metric DEM.
-        out_shp: output ``.shp`` path for the single longest line.
+    Why points, not lines: GRASS 7.8's vector outputs (``stream_vector`` and
+    ``r.to.vect type=line``) come back empty / zero-length on this build, while
+    the stream RASTER is solid. ``native_rem`` only needs sample points along the
+    channel, so we skip vector export entirely and sample the raster directly.
+    (Sampling the full extracted network yields a height-above-nearest-channel
+    surface — a sensible detrend where there's no OSM river to follow.)
 
-    Returns:
-        The ``out_shp`` path on success, or ``None`` on any failure (so the
-        orchestrator raises only after the manual + OSM providers are also
-        exhausted).
+    Returns the ``out_shp`` path on success, or ``None`` on any failure (so the
+    orchestrator raises only after the manual + OSM providers are also exhausted).
     """
     # Imported lazily: ``processing`` only exists inside a running QGIS, so a
     # standalone py_compile / import of this module must not require it.
@@ -254,45 +260,121 @@ def grass_centerline(dem_utm_path, out_shp):
         return None
 
     try:
-        # Accumulation threshold scaled to ~0.25 km2 of drainage by pixel area,
-        # floored so a tiny/coarse DEM still yields a network.
         threshold = _grass_threshold_for_dem(dem_utm_path)
 
         tmp_dir = tempfile.mkdtemp(prefix="riverrem_grass_")
         accum_tif = os.path.join(tmp_dir, "accum.tif")
-        streams_shp = os.path.join(tmp_dir, "streams.shp")
+        stream_tif = os.path.join(tmp_dir, "streams.tif")
 
-        # 1) Flow accumulation. r.watershed's "accumulation" output is the
-        #    flow-accumulation raster we threshold on.
+        # 1) Flow accumulation (SFD = crisper channels).
         processing.run(
             "grass7:r.watershed",
             {
                 "elevation": dem_utm_path,
                 "accumulation": accum_tif,
-                "-s": True,        # single flow direction (SFD), crisper channels
+                "-s": True,
                 "GRASS_REGION_PARAMETER": None,
                 "GRASS_REGION_CELLSIZE_PARAMETER": 0,
             },
         )
 
-        # 2) Extract a vector stream network from the accumulation raster.
+        # 2) Extract the stream RASTER (the vector outputs are broken on GRASS 7.8).
         processing.run(
             "grass7:r.stream.extract",
             {
                 "elevation": dem_utm_path,
                 "accumulation": accum_tif,
                 "threshold": threshold,
-                "stream_vector": streams_shp,
+                "stream_raster": stream_tif,
                 "GRASS_REGION_PARAMETER": None,
                 "GRASS_REGION_CELLSIZE_PARAMETER": 0,
-                "GRASS_OUTPUT_TYPE_PARAMETER": 2,   # line output
             },
         )
     except Exception:
         return None
 
-    # 3) Keep the single longest line and write it to out_shp.
-    return _keep_longest_line(streams_shp, out_shp)
+    # 3) Stream cells -> channel points (DEM CRS).
+    return _stream_raster_to_points(
+        stream_tif, out_shp, GRASS_MAX_CENTERLINE_POINTS)
+
+
+def _stream_raster_to_points(stream_tif, out_shp, max_points):
+    """Convert a GRASS stream raster to a POINT shapefile of channel cell centres.
+
+    Returns out_shp, or None if there are no stream cells / on error.
+    """
+    try:
+        import numpy as np
+
+        ds = gdal.Open(stream_tif)
+        if ds is None:
+            return None
+        band = ds.GetRasterBand(1)
+        arr = band.ReadAsArray()
+        nodata = band.GetNoDataValue()
+        gt = ds.GetGeoTransform()
+        proj = ds.GetProjection()
+        ds = None
+
+        mask = np.isfinite(arr) & (arr != 0)
+        if nodata is not None:
+            mask &= (arr != nodata)
+        rows, cols = np.where(mask)
+        if rows.size == 0:
+            return None
+
+        # Subsample to a manageable, well-distributed set of channel points.
+        if rows.size > max_points:
+            step = int(np.ceil(rows.size / float(max_points)))
+            rows = rows[::step]
+            cols = cols[::step]
+
+        xs = gt[0] + (cols + 0.5) * gt[1] + (rows + 0.5) * gt[2]
+        ys = gt[3] + (cols + 0.5) * gt[4] + (rows + 0.5) * gt[5]
+
+        srs = osr.SpatialReference()
+        srs.ImportFromWkt(proj)
+        return _write_points_shapefile(np.column_stack([xs, ys]), out_shp, srs)
+    except Exception:
+        return None
+
+
+def _write_points_shapefile(points_xy, out_shp, srs):
+    """Write (N, 2) world coords as POINT features. Returns path or None."""
+    driver = ogr.GetDriverByName("ESRI Shapefile")
+    if driver is None:
+        return None
+    if os.path.exists(out_shp):
+        driver.DeleteDataSource(out_shp)
+    out_dir = os.path.dirname(out_shp)
+    if out_dir and not os.path.isdir(out_dir):
+        os.makedirs(out_dir, exist_ok=True)
+
+    ds = driver.CreateDataSource(out_shp)
+    if ds is None:
+        return None
+    layer = ds.CreateLayer(
+        os.path.splitext(os.path.basename(out_shp))[0], srs, ogr.wkbPoint)
+    if layer is None:
+        ds = None
+        return None
+    layer.CreateField(ogr.FieldDefn("id", ogr.OFTInteger))
+    defn = layer.GetLayerDefn()
+
+    written = 0
+    for i in range(points_xy.shape[0]):
+        pt = ogr.Geometry(ogr.wkbPoint)
+        pt.AddPoint_2D(float(points_xy[i, 0]), float(points_xy[i, 1]))
+        feat = ogr.Feature(defn)
+        feat.SetGeometry(pt)
+        feat.SetField("id", written)
+        layer.CreateFeature(feat)
+        feat = None
+        written += 1
+
+    layer = None
+    ds = None
+    return out_shp if written else None
 
 
 def _grass_threshold_for_dem(dem_utm_path):
