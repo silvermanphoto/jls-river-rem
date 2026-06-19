@@ -90,17 +90,20 @@ class RemTask(QgsTask):
 
         self.results = None   # dict on success (see below)
         self.exc = None       # str traceback on failure
+        # Current stage's progress band; _progress_cb maps a 0..100 sub-progress
+        # into this so download/REM callbacks advance the bar within their phase.
+        self._stage_lo = 0.0
+        self._stage_hi = 100.0
 
     # -- helpers --------------------------------------------------------------
 
-    def _progress_cb(self, frac):
-        """Adapter so engine/download helpers can drive the task progress bar.
-
-        frac is 0..1 for the *current stage*; we leave the absolute scaling to
-        the explicit setProgress() calls in run() and just nudge within range.
-        """
+    def _progress_cb(self, sub):
+        """Map a 0..100 sub-progress (from the download or REM helper) into the
+        current stage's band [_stage_lo, _stage_hi] so the bar advances smoothly
+        within each phase instead of jumping or sitting frozen."""
         try:
-            self.setProgress(max(0.0, min(100.0, float(frac) * 100.0)))
+            lo, hi = self._stage_lo, self._stage_hi
+            self.setProgress(max(0.0, min(100.0, lo + (hi - lo) * float(sub) / 100.0)))
         except Exception:
             pass
 
@@ -132,6 +135,7 @@ class RemTask(QgsTask):
             chosen = None
             errors = []
             skipped = []   # higher-res datasets tried-and-skipped before success
+            self._stage_lo, self._stage_hi = 2.0, 35.0   # download phase band
             for cand in candidates:
                 if self.isCanceled():
                     return False
@@ -220,6 +224,7 @@ class RemTask(QgsTask):
                 return False
 
             # ---- Stage 4: make the REM --------------------------------------
+            self._stage_lo, self._stage_hi = 60.0, 100.0   # REM compute band
             rem_out = rem_engine.make_rem(
                 dem_utm_path,
                 centerline_shp,

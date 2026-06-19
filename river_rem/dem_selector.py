@@ -314,8 +314,14 @@ def _stream_one(url, params, out_path, label, progress_cb):
                     continue
                 fh.write(chunk)
                 written += len(chunk)
-                if progress_cb and total_bytes > 0:
-                    progress_cb(min(100.0, 100.0 * written / total_bytes))
+                if progress_cb:
+                    if total_bytes > 0:
+                        progress_cb(min(100.0, 100.0 * written / total_bytes))
+                    else:
+                        # USGS1m sends no Content-Length: asymptotic creep on
+                        # bytes so the bar moves instead of sitting frozen.
+                        progress_cb(100.0 * (1.0 - math.exp(
+                            -written / (60.0 * 1024 * 1024))))
     except OSError as exc:
         resp.close()
         raise RuntimeError(
