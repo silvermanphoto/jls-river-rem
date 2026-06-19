@@ -202,19 +202,31 @@ def _make_hillshade(dem_path, out_path, z_factor=None, azimuth=None, altitude=No
 # Load rasters into the project (hillshade UNDER, colored REM on top, Multiply)
 # ---------------------------------------------------------------------------
 
+def _group_name(results):
+    """A short, self-describing name for the REM's layer-tree group."""
+    ds = results.get("dataset")
+    res = results.get("res_m")
+    if ds and res is not None:
+        return "River REM · %s %sm" % (ds, res)
+    if ds:
+        return "River REM · %s" % ds
+    return "River REM"
+
+
 def load_results(results):
-    """Add the run's rasters to the current QgsProject, styled for the glow.
+    """Add the run's rasters into a single COLLAPSED layer-tree group.
 
-    Order (bottom -> top): hillshade (grayscale), then the colored REM set to
-    Multiply so the terrain shading shows through the color. If riverrem ever
-    produced a baked hillshade-color viz it's added on top as well.
+    The group holds the colored REM (top, Multiply blend) over its hillshade
+    (bottom), so a well-organized project gets one tidy folder per run instead of
+    two loose layers. If riverrem ever produced a baked viz it goes on top.
 
-    `results` expects 'rem_tif' (required); 'out_dir' (to find dem_utm.tif for
-    the hillshade) and 'viz_tif' (optional) are used if present.
+    `results` expects 'rem_tif' (required); 'out_dir' (to find dem_utm.tif),
+    'dataset'/'res_m' (group name), and 'viz_tif' are used if present.
 
     Returns the list of added QgsRasterLayer objects.
     """
     project = QgsProject.instance()
+    root = project.layerTreeRoot()
     added = []
 
     rem_tif = results.get("rem_tif")
@@ -224,31 +236,37 @@ def load_results(results):
     run_dir = results.get("out_dir") or os.path.dirname(rem_tif)
     dem_utm = os.path.join(run_dir, "dem_utm.tif")
 
-    # 1) Hillshade first so it sits BENEATH the colored REM.
-    hs_path = _make_hillshade(dem_utm, os.path.join(run_dir, "hillshade.tif"))
-    if hs_path:
-        hs_layer = QgsRasterLayer(hs_path, "hillshade")
-        if hs_layer.isValid():
-            # Default single-band gray is exactly what we want.
-            project.addMapLayer(hs_layer)
-            added.append(hs_layer)
+    # New collapsed group at the top of the tree.
+    group = root.insertGroup(0, _group_name(results))
 
-    # 2) Colored REM on top (Multiply blend applied inside apply_rem_pseudocolor).
+    # 1) Colored REM on top of the group (Multiply blend set in apply_rem_pseudocolor).
     rem_name = os.path.splitext(os.path.basename(rem_tif))[0]
     rem_layer = QgsRasterLayer(rem_tif, rem_name)
     if rem_layer.isValid():
         apply_rem_pseudocolor(rem_layer)
-        project.addMapLayer(rem_layer)
+        project.addMapLayer(rem_layer, False)   # register, don't add to tree root
+        group.addLayer(rem_layer)
         added.append(rem_layer)
 
-    # 3) If a baked riverrem viz exists, drop it on top as an alternative.
+    # 2) Hillshade BENEATH the REM, inside the same group.
+    hs_path = _make_hillshade(dem_utm, os.path.join(run_dir, "hillshade.tif"))
+    if hs_path:
+        hs_layer = QgsRasterLayer(hs_path, "hillshade")
+        if hs_layer.isValid():
+            project.addMapLayer(hs_layer, False)
+            group.addLayer(hs_layer)
+            added.append(hs_layer)
+
+    # 3) Optional baked riverrem viz on top of the group.
     viz_tif = results.get("viz_tif")
     if viz_tif and os.path.exists(viz_tif):
         viz_layer = QgsRasterLayer(viz_tif, os.path.splitext(os.path.basename(viz_tif))[0])
         if viz_layer.isValid():
-            project.addMapLayer(viz_layer)
+            project.addMapLayer(viz_layer, False)
+            group.insertLayer(0, viz_layer)
             added.append(viz_layer)
 
+    group.setExpanded(False)   # collapsed by default
     return added
 
 
