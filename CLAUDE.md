@@ -237,3 +237,24 @@ Hard-won, non-obvious findings. Read before changing the matching code.
   running; the headless QGIS-LTR/QGIS-4 binaries don't bootstrap standalone
   (4.0's hard-codes a CI stdlib path). Offscreen testing uses the QGIS-LTR python
   with `PYTHONPATH` to the bundle's `Resources/python(/plugins)`.
+
+## Git and GitHub sync
+
+This repo is synced to a PRIVATE GitHub repository:
+https://github.com/silvermanphoto/jls-river-rem
+
+Remote: `origin` (HTTPS). After every commit, push to keep GitHub in sync.
+
+Rules:
+1. ALWAYS push after committing — a local-only commit is incomplete work. If
+   Joel forgets, remind him. (This project sat local-only through v0.1.12 — don't
+   repeat that; sync early.)
+2. Never force-push (`--force`) without Joel's explicit approval.
+3. The repo is PRIVATE. Do not change its visibility.
+4. Never commit build artifacts, secrets, or logs. The `.gitignore` covers these
+   (rem_outputs/, *.tif, caches) — the OpenTopography API key lives ONLY in QGIS
+   QSettings, never in the repo. Add new generated/sensitive categories to
+   `.gitignore` before committing.
+5. Don't commit files that would push the repo past GitHub's size limits — the
+   DEM/REM rasters are regenerable and gitignored; the code rebuilds everything.
+6. Downloaded rasters are excluded by design; there are no databases here.
