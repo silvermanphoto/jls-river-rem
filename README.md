@@ -1,14 +1,28 @@
 # River REM — one-click Relative Elevation Models in QGIS
 
-Zoom the QGIS map to any river on Earth, click one toolbar button, and get a styled
-**Relative Elevation Model** of that river — no data hunting, no preprocessing, no
-pip installs.
+**This project is a fork of [OpenTopography/RiverREM](https://github.com/OpenTopography/RiverREM),
+modified to run as a QGIS plugin.** All credit for the REM concept, method, and the
+original implementation belongs to the OpenTopography RiverREM project.
+
+From the original RiverREM Project Notes:
+
+> RiverREM is a Python package for automatically generating river relative elevation
+> model (REM) visualizations from nothing but an input digital elevation model (DEM).
+> The package uses the OpenStreetMap API to retrieve river centerline geometries over
+> the DEM extent. Interpolation of river elevations is automatically handled using a
+> sampling scheme based on raster resolution and river sinuosity to create striking
+> high-resolution visualizations without interpolation artifacts straight out of the
+> box and without additional manual steps.
+
+This fork wraps that idea in a QGIS toolbar button: zoom the map to any river on
+Earth, click once, and get a styled **Relative Elevation Model** — no data hunting,
+no preprocessing, no pip installs.
 
 A REM (also called a detrended DEM) re-references every pixel of a digital elevation
 model to the local river water surface instead of sea level. The result makes
 floodplains, meander scars, oxbows, and centuries of channel migration leap out of
 otherwise flat-looking terrain — the technique behind the luminous river maps
-popularized by Daniel Coe and the DGGS RiverREM project.
+popularized by Daniel Coe and the RiverREM project.
 
 ## What the plugin does
 
@@ -55,15 +69,18 @@ engine were actually used.
    never in this repository.
 4. Zoom to a river and click **Generate River REM** on the toolbar.
 
-## Why the REM engine is built in
+## How this fork differs from upstream RiverREM
 
-The only `riverrem` package on PyPI is a broken 0.0.1 relic (it can't import
-against modern GDAL and crashes on small DEMs), and the current GitHub RiverREM
-drags in dependencies that destabilize QGIS's bundled Python. So this plugin
-ships its own native engine — a scipy `cKDTree` IDW interpolation plus GDAL —
-verified against the bundled GDAL. If a working RiverREM installation is ever
-present, the plugin uses it automatically and falls back to the native engine
-otherwise.
+Living inside QGIS imposes one hard constraint the upstream package doesn't
+have: the plugin can only use libraries already bundled with QGIS's own Python,
+because pip-installing into that environment (osmnx, a newer seaborn, a
+different GDAL) destabilizes it. So this fork re-implements the REM
+interpolation as a self-contained native engine — a scipy `cKDTree`
+inverse-distance interpolation plus the bundled GDAL — and supplies the river
+centerline itself (Overpass query → GRASS hydrology → manual layer) rather than
+importing osmnx. If a working RiverREM installation is present, the plugin
+still uses it automatically and applies its hillshade-color blend; the native
+engine is the fallback that makes the plugin work out of the box.
 
 ## Known limitation
 
